@@ -62,8 +62,6 @@ static void IRAM_ATTR i2s_isr(void* arg) {
         shiftCompleteCallback();
 }
 
-#define DMA_MAX (4096-4)
-
 //Calculate the amount of dma descs needed for a buffer desc
 static int calc_needed_dma_descs_for(i2s_parallel_buffer_desc_t *desc) {
     int ret=0;
@@ -119,6 +117,18 @@ void link_dma_desc(volatile lldesc_t *dmadesc, volatile lldesc_t *prevdmadesc, v
     // link previous to current
     if(prevdmadesc)
         prevdmadesc->qe.stqe_next = (lldesc_t*)dmadesc;
+}
+
+void link_large_dma( lldesc_t **dmadesc, lldesc_t **prevdmadesc, void *memory, size_t size) {
+    while( size>0 ) {
+        int dmaSize = size > DMA_MAX ? DMA_MAX : size;
+        link_dma_desc( *dmadesc, *prevdmadesc, memory, dmaSize );
+        *prevdmadesc = *dmadesc;
+        (*dmadesc)++;
+        size -= dmaSize;
+        memory += dmaSize;
+//        printf( "DMA linked, %d bytes\r\n", dmaSize );
+    }
 }
 
 static void gpio_setup_out(int gpio, int sig) {
@@ -320,10 +330,10 @@ void i2s_parallel_setup_without_malloc(i2s_dev_t *dev, const i2s_parallel_config
     
     dev->clkm_conf.val=0;
     dev->clkm_conf.clka_en=0;
-    dev->clkm_conf.clkm_div_a=63;
-    dev->clkm_conf.clkm_div_b=63;
-    //We ignore the possibility for fractional division here, clkspeed_hz must round up for a fractional clock speed, must result in >= 2
-    dev->clkm_conf.clkm_div_num=80000000L/(cfg->clkspeed_hz + 1);
+    dev->clkm_conf.clkm_div_a=1;
+    dev->clkm_conf.clkm_div_b=0;
+    //We ignore the possibility for fractional division here, clkspeed_hz is rounded, must result in >= 2
+    dev->clkm_conf.clkm_div_num=(80000000L+cfg->clkspeed_hz/2)/cfg->clkspeed_hz;
 
     dev->fifo_conf.val=0;
     dev->fifo_conf.rx_fifo_mod_force_en=1;

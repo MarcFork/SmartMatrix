@@ -113,7 +113,7 @@ template <int refreshDepth, int matrixWidth, int matrixHeight, unsigned char pan
 uint16_t SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::refreshRate = 120;
 
 template <int refreshDepth, int matrixWidth, int matrixHeight, unsigned char panelType, unsigned char optionFlags>
-uint16_t SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::minRefreshRate = 120;
+uint16_t SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::minRefreshRate = 60;
 
 template <int refreshDepth, int matrixWidth, int matrixHeight, unsigned char panelType, unsigned char optionFlags>
 uint8_t SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::lsbMsbTransitionBit = 0;
@@ -218,13 +218,23 @@ void SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, pan
     // calculate the lowest LSBMSB_TRANSITION_BIT value that will fit in memory
     int numDescriptorsPerRow;
     lsbMsbTransitionBit = 0;
+    int ramrequired = 0;
+#ifndef SCAN_BY_ROW	// SCAN_BY_BITPLANE
+    int bitplaneBytes = sizeof(rowBitStruct) * MATRIX_SCAN_MOD;
+    int numDescriptorsPerBitplane = (bitplaneBytes + DMA_MAX-1)/DMA_MAX;
+    printf( "Bitplanes take %d bytes, requiring %d DMA descriptors each.\r\n", bitplaneBytes, numDescriptorsPerBitplane );
+#endif
+
     while(1) {
+#ifdef SCAN_BY_ROW
         numDescriptorsPerRow = 1;
         for(int i=lsbMsbTransitionBit + 1; i<COLOR_DEPTH_BITS; i++) {
             numDescriptorsPerRow += 1<<(i - lsbMsbTransitionBit - 1);
         }
-
-        int ramrequired = numDescriptorsPerRow * MATRIX_SCAN_MOD * ESP32_NUM_FRAME_BUFFERS * sizeof(lldesc_t);
+        ramrequired = numDescriptorsPerRow * MATRIX_SCAN_MOD * ESP32_NUM_FRAME_BUFFERS * sizeof(lldesc_t);
+#else // SCAN_BY_BITPLANE
+        ramrequired = ((1 << (COLOR_DEPTH_BITS-lsbMsbTransitionBit)) + lsbMsbTransitionBit - 1) * numDescriptorsPerBitplane * ESP32_NUM_FRAME_BUFFERS * sizeof(lldesc_t);
+#endif
         int largestblockfree = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
 
         printf("lsbMsbTransitionBit of %d requires %d RAM, %d available, leaving %d free: \r\n", lsbMsbTransitionBit, ramrequired, largestblockfree, largestblockfree - ramrequired);
@@ -238,7 +248,7 @@ void SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, pan
             break;
     }
 
-    if(numDescriptorsPerRow * MATRIX_SCAN_MOD * ESP32_NUM_FRAME_BUFFERS * sizeof(lldesc_t) > heap_caps_get_largest_free_block(MALLOC_CAP_DMA)){
+    if(ramrequired > heap_caps_get_largest_free_block(MALLOC_CAP_DMA)){
         printf("not enough RAM for SmartMatrix descriptors\r\n");
         return;
     }
@@ -284,15 +294,19 @@ void SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, pan
     //matrixCalcCallback();
 
     // lsbMsbTransition Bit is now finalized - redo descriptor count in case it changed to hit min refresh rate
+#ifdef SCAN_BY_ROW
     numDescriptorsPerRow = 1;
     for(int i=lsbMsbTransitionBit + 1; i<COLOR_DEPTH_BITS; i++) {
         numDescriptorsPerRow += 1<<(i - lsbMsbTransitionBit - 1);
     }
 
-    printf("Descriptors for lsbMsbTransitionBit %d/%d with %d rows require %d bytes of DMA RAM\r\n", lsbMsbTransitionBit, COLOR_DEPTH_BITS - 1, MATRIX_SCAN_MOD, 2 * numDescriptorsPerRow * MATRIX_SCAN_MOD * sizeof(lldesc_t));
+    int desccount = numDescriptorsPerRow * MATRIX_SCAN_MOD;
+#else // SCAN_BY_BITPLANE
+    int desccount = ((1 << (COLOR_DEPTH_BITS-lsbMsbTransitionBit)) + lsbMsbTransitionBit - 1) * numDescriptorsPerBitplane;
+#endif
+    printf("Descriptors for lsbMsbTransitionBit %d/%d with %d rows require %d bytes of DMA RAM\r\n", lsbMsbTransitionBit, COLOR_DEPTH_BITS - 1, MATRIX_SCAN_MOD, ESP32_NUM_FRAME_BUFFERS * desccount * sizeof(lldesc_t));
 
     // malloc the DMA linked list descriptors that i2s_parallel will need
-    int desccount = numDescriptorsPerRow * MATRIX_SCAN_MOD;
     lldesc_t * dmadesc_a = (lldesc_t *)heap_caps_malloc(desccount * sizeof(lldesc_t), MALLOC_CAP_DMA);
     if(!dmadesc_a) {
         printf("can't malloc dmadesc_a");
@@ -312,9 +326,9 @@ void SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, pan
 
     lldesc_t *prevdmadesca = 0;
     lldesc_t *prevdmadescb = 0;
-    int currentDescOffset = 0;
-
+#ifdef SCAN_BY_ROW 
     // fill DMA linked lists for both frames
+    int currentDescOffset = 0;
     for(int j=0; j<MATRIX_SCAN_MOD; j++) {
         // first set of data is LSB through MSB, single pass - all color bits are displayed once, which takes care of everything below and inlcluding LSBMSB_TRANSITION_BIT
         // TODO: size must be less than DMA_MAX - worst case for SmartMatrix Library: 16-bpp with 256 pixels per row would exceed this, need to break into two
@@ -341,12 +355,40 @@ void SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, pan
             }
         }
     }
-
     //End markers
     dmadesc_a[desccount-1].eof = 1;
     dmadesc_b[desccount-1].eof = 1;
     dmadesc_a[desccount-1].qe.stqe_next=(lldesc_t*)&dmadesc_a[0];
     dmadesc_b[desccount-1].qe.stqe_next=(lldesc_t*)&dmadesc_b[0];
+
+#else // SCAN_BY_BITPLANE
+// temporal dithering of bitplanes to reduce flicker and maximize accuracy of image captured by partial frame camera shutter speeds.
+    lldesc_t *currdmadesc_a = dmadesc_a;
+    lldesc_t *currdmadesc_b = dmadesc_b;
+    for(int k=1; k < 1<<(COLOR_DEPTH_BITS - lsbMsbTransitionBit - 1); k++) {
+	int i = COLOR_DEPTH_BITS-ffs(k);
+        link_large_dma( &currdmadesc_a, &prevdmadesca, matrixUpdateFrames[0]->bitplane[i].rowbit[0].data, bitplaneBytes );
+        link_large_dma( &currdmadesc_b, &prevdmadescb, matrixUpdateFrames[1]->bitplane[i].rowbit[0].data, bitplaneBytes );
+//        printf("i %d, k %d, size %d\r\n", i, k, bitplaneBytes );
+    }
+// bitplanes <= lsbMsbTransitionBit are inserted in the middle where the lsb would naturally sit in the dithering sequence.
+// They need to be output sequentially because encoded partial brightness straddles bitplanes.
+    for(int i=0; i<=lsbMsbTransitionBit; i++) {
+        link_large_dma( &currdmadesc_a, &prevdmadesca, matrixUpdateFrames[0]->bitplane[i].rowbit[0].data, bitplaneBytes );
+        link_large_dma( &currdmadesc_b, &prevdmadescb, matrixUpdateFrames[1]->bitplane[i].rowbit[0].data, bitplaneBytes );
+    }
+    for(int k=1; k < 1<<(COLOR_DEPTH_BITS - lsbMsbTransitionBit - 1); k++) {
+	int i = COLOR_DEPTH_BITS-ffs(k);
+        link_large_dma( &currdmadesc_a, &prevdmadesca, matrixUpdateFrames[0]->bitplane[i].rowbit[0].data, bitplaneBytes );
+        link_large_dma( &currdmadesc_b, &prevdmadescb, matrixUpdateFrames[1]->bitplane[i].rowbit[0].data, bitplaneBytes );
+//        printf("i %d, k %d, size %d\r\n", i, k, bitplaneBytes );
+    }
+    //End markers
+    prevdmadesca->eof = prevdmadescb->eof = 1;
+    prevdmadesca->qe.stqe_next = dmadesc_a;
+    prevdmadescb->qe.stqe_next = dmadesc_b;
+#endif
+
 
     //printf("\n");
 

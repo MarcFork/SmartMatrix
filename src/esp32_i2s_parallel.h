@@ -12,6 +12,8 @@ extern "C" {
 #include "soc/i2s_struct.h"
 #include "rom/lldesc.h"
 
+#define DMA_MAX (4096-4)
+
 typedef enum {
     I2S_PARALLEL_BITS_8=8,
     I2S_PARALLEL_BITS_16=16,
@@ -41,6 +43,7 @@ void i2s_parallel_setup_without_malloc(i2s_dev_t *dev, const i2s_parallel_config
 void i2s_parallel_flip_to_buffer(i2s_dev_t *dev, int bufid);
 bool i2s_parallel_is_previous_buffer_free();
 void link_dma_desc(volatile lldesc_t *dmadesc, volatile lldesc_t *prevdmadesc, void *memory, size_t size);
+void link_large_dma(lldesc_t **dmadesc, lldesc_t **prevdmadesc, void *memory, size_t size);
 
 typedef void (*callback)(void);
 void setShiftCompleteCallback(callback f);

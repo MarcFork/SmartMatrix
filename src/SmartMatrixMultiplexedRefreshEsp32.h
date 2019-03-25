@@ -34,7 +34,7 @@ public:
     struct rowBitStruct {
         MATRIX_DATA_STORAGE_TYPE data[PIXELS_PER_LATCH + CLKS_DURING_LATCH];
     };
-
+#ifdef SCAN_BY_ROW
     struct rowDataStruct {
         rowBitStruct rowbits[COLOR_DEPTH_BITS];
     };
@@ -42,6 +42,16 @@ public:
     struct frameStruct {
         rowDataStruct rowdata[MATRIX_SCAN_MOD];
     };
+#else // SCAN_BY_BITPLANE
+    struct bitplaneDataStruct {
+        rowBitStruct rowbit[MATRIX_SCAN_MOD];
+    };
+
+    struct frameStruct {
+        bitplaneDataStruct bitplane[COLOR_DEPTH_BITS];
+    };
+#endif
+
 
     typedef void (*matrix_calc_callback)(void);
 

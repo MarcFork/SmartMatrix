@@ -30,9 +30,15 @@ extern void matrixCalculationsSignal(void);
 template <int refreshDepth, int matrixWidth, int matrixHeight, unsigned char panelType, unsigned char optionFlags>
 class SmartMatrix3 {
 public:
+#ifdef SCAN_BY_ROW
     typedef typename SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::frameStruct frameStruct;
     typedef typename SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::rowDataStruct rowDataStruct;
     typedef typename SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::rowBitStruct rowBitStruct;
+#else // SCAN_BY_BITPLANE
+    typedef typename SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::frameStruct frameStruct;
+    typedef typename SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::bitplaneDataStruct bitplaneDataStruct;
+    typedef typename SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::rowBitStruct rowBitStruct;
+#endif 
 
     // init
     SmartMatrix3(void);
@@ -93,6 +99,8 @@ private:
     static bool refreshRateLowered;
     static bool refreshRateChanged;
     static uint8_t lsbMsbTransitionBit;
+    static uint8_t preLatchBlank;
+    static uint8_t postLatchBlank;
     static TaskHandle_t calcTaskHandle;
     
     static int multiRowRefresh_mapIndex_CurrentRowGroups;

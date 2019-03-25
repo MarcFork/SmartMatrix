@@ -61,6 +61,12 @@ template <int refreshDepth, int matrixWidth, int matrixHeight, unsigned char pan
 uint8_t SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::lsbMsbTransitionBit;
 
 template <int refreshDepth, int matrixWidth, int matrixHeight, unsigned char panelType, unsigned char optionFlags>
+uint8_t SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::preLatchBlank;
+
+template <int refreshDepth, int matrixWidth, int matrixHeight, unsigned char panelType, unsigned char optionFlags>
+uint8_t SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::postLatchBlank;
+
+template <int refreshDepth, int matrixWidth, int matrixHeight, unsigned char panelType, unsigned char optionFlags>
 int SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::multiRowRefresh_mapIndex_CurrentRowGroups = 0;
 
 template <int refreshDepth, int matrixWidth, int matrixHeight, unsigned char panelType, unsigned char optionFlags>
@@ -206,7 +212,8 @@ int SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags
 
 template <int refreshDepth, int matrixWidth, int matrixHeight, unsigned char panelType, unsigned char optionFlags>
 void SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::setBrightness(uint8_t newBrightness) {
-    brightness = (PIXELS_PER_LATCH*newBrightness)/255;
+    
+    brightness = ((PIXELS_PER_LATCH-preLatchBlank-postLatchBlank)*newBrightness)/255;
     brightnessChange = true;
 }
 
@@ -337,6 +344,11 @@ void SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlag
     // refresh rate is now set, update calc refresh rate
     setCalcRefreshRateDivider(calc_refreshRateDivider);
     lsbMsbTransitionBit = SmartMatrix3RefreshMultiplexed<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::getLsbMsbTransitionBit();
+    preLatchBlank = (20 * ESP32_I2S_CLOCK_SPEED) / 100000000UL + 1;	// 200ns
+    postLatchBlank = (20 * ESP32_I2S_CLOCK_SPEED) / 100000000UL + 1;	// 200ns
+    printf( "preLatchBlank: %d\r\n", preLatchBlank );
+    printf( "postLatchBlank: %d\r\n", postLatchBlank );
+    setBrightness(255);
 }
 
 #define IS_LAST_PANEL_MAP_ENTRY(x) (!x.rowOffset && !x.bufferOffset && !x.numPixels)
@@ -524,7 +536,11 @@ INLINE void SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, opt
 
             uint16_t mask = (1 << (j + maskoffset));
             
+#ifdef SCAN_BY_ROW
             SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::rowBitStruct *p=&(frameBuffer->rowdata[currentRow].rowbits[j]); //bitplane location to write to
+#else // SCAN_BY_BITPLANE
+            SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::rowBitStruct *p=&(frameBuffer->bitplane[j].rowbit[currentRow]); //bitplane location to write to
+#endif
             
             int i=0;
 
@@ -590,14 +606,14 @@ INLINE void SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, opt
                     // turn off OE after brightness value is reached when displaying MSBs
                     // MSBs always output normal brightness
                     // LSB (!j) outputs normal brightness as MSB from previous row is being displayed
-                    if((j > lsbMsbTransitionBit || !j) && ((refreshBufferPosition) >= brightness)) v|=BIT_OE;
+                    if((j > lsbMsbTransitionBit || !j) && ((refreshBufferPosition) > brightness)) v|=BIT_OE;
 
 #ifndef OEPWM_TEST_ENABLE
                     // special case for the bits *after* LSB through (lsbMsbTransitionBit) - OE is output after data is shifted, so need to set OE to fractional brightness
                     if(j && j <= lsbMsbTransitionBit) {
                         // divide brightness in half for each bit below lsbMsbTransitionBit
                         int lsbBrightness = brightness >> (lsbMsbTransitionBit - j + 1);
-                        if((refreshBufferPosition) >= lsbBrightness) v|=BIT_OE;
+                        if((refreshBufferPosition) > lsbBrightness) v|=BIT_OE;
                     }
 #else
                     // TODO: this is probably not working after adding support for multi-row refresh panels
@@ -612,7 +628,7 @@ INLINE void SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, opt
                         } else {
                             // divide brightness in half for each bit below lsbMsbTransitionBit
                             int lsbBrightness = brightness >> (lsbMsbTransitionBit - j + 1);
-                            if((refreshBufferPosition) >= lsbBrightness) v|=BIT_OE;
+                            if((refreshBufferPosition) > lsbBrightness) v|=BIT_OE;
                         }
                     }                
 #endif
@@ -779,6 +795,9 @@ INLINE void SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, opt
         memset(tempRow0, 0x00, sizeof(rgb24) * numPixelsPerTempRow);
         memset(tempRow1, 0x00, sizeof(rgb24) * numPixelsPerTempRow);
 
+        int row1 = currentRow;
+        int row2 = currentRow + ROW_PAIR_OFFSET;
+
         // get a row of physical pixel data (HUB75 paired) from the layers
         SM_Layer * templayer = SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::baseLayer;
         while(templayer) {
@@ -793,8 +812,8 @@ INLINE void SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, opt
                 } else if(!(optionFlags & SMARTMATRIX_OPTIONS_C_SHAPE_STACKING) &&
                     !(optionFlags & SMARTMATRIX_OPTIONS_BOTTOM_TO_TOP_STACKING)) {
                     // fill data from top to bottom, so top panel is the one closest to Teensy
-                    templayer->fillRefreshRow((currentRow + multiRowRefreshRowOffset) + i*MATRIX_PANEL_HEIGHT, &tempRow0[i*matrixWidth]);
-                    templayer->fillRefreshRow((currentRow + multiRowRefreshRowOffset) + ROW_PAIR_OFFSET + i*MATRIX_PANEL_HEIGHT, &tempRow1[i*matrixWidth]);
+                    templayer->fillRefreshRow((row1 + multiRowRefreshRowOffset) + i*MATRIX_PANEL_HEIGHT, &tempRow0[i*matrixWidth]);
+                    templayer->fillRefreshRow((row2 + multiRowRefreshRowOffset) + i*MATRIX_PANEL_HEIGHT, &tempRow1[i*matrixWidth]);
                 // C-shape, bottom to top
                 } else if((optionFlags & SMARTMATRIX_OPTIONS_C_SHAPE_STACKING) &&
                     (optionFlags & SMARTMATRIX_OPTIONS_BOTTOM_TO_TOP_STACKING)) {
@@ -829,7 +848,7 @@ INLINE void SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, opt
                 uint8_t GPIO_WORD_ORDER_8BIT;
             };
         } o0;
-        
+
         for(int j=0; j<COLOR_DEPTH_BITS; j++) {
             int maskoffset = 0;
             if(COLOR_DEPTH_BITS == 12)   // 36-bit color
@@ -841,8 +860,12 @@ INLINE void SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, opt
 
             uint16_t mask = (1 << (j + maskoffset));
             
+#ifdef SCAN_BY_ROW
             SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::rowBitStruct *p=&(frameBuffer->rowdata[currentRow].rowbits[j]); //bitplane location to write to
-            
+#else // SCAN_BY_BITPLANE
+            SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, optionFlags>::rowBitStruct *p=&(frameBuffer->bitplane[j].rowbit[currentRow]); //bitplane location to write to
+#endif
+       
             int i=0;
 
             // reset pixel map offset so we start filling from the first panel again
@@ -876,8 +899,12 @@ INLINE void SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, opt
                     // if there is no latch to hold address, output ADDX lines directly to GPIO and latch data at end of cycle
                     int gpioRowAddress = currentRow;
                     // normally output current rows ADDX, special case for LSB, output previous row's ADDX (as previous row is being displayed for one latch cycle)
+#ifdef SCAN_BY_ROW
                     if(j == 0)
                         gpioRowAddress = currentRow-1;
+#else
+                    gpioRowAddress = currentRow-1;
+#endif
 
                     if (gpioRowAddress & 0x01) v|=BIT_A;
                     if (gpioRowAddress & 0x02) v|=BIT_B;
@@ -886,31 +913,37 @@ INLINE void SmartMatrix3<refreshDepth, matrixWidth, matrixHeight, panelType, opt
                     if (gpioRowAddress & 0x10) v|=BIT_E;
 
                     // need to disable OE after latch to hide row transition
-                    if((refreshBufferPosition) == 0) v|=BIT_OE;
+                    if((refreshBufferPosition) < postLatchBlank ) v|=BIT_OE;
 
                     // drive latch while shifting out last bit of RGB data
                     if((refreshBufferPosition) == PIXELS_PER_LATCH-1) v|=BIT_LAT;
 #endif
 
                     // turn off OE after brightness value is reached when displaying MSBs
+#ifdef SCAN_BY_ROW
                     // MSBs always output normal brightness
                     // LSB (!j) outputs normal brightness as MSB from previous row is being displayed
-                    if((j > lsbMsbTransitionBit || !j) && ((refreshBufferPosition) >= brightness)) v|=BIT_OE;
+                    if((j > lsbMsbTransitionBit || !j) && ((refreshBufferPosition) >= brightness+postLatchBlank)) v|=BIT_OE;
 
                     // special case for the bits *after* LSB through (lsbMsbTransitionBit) - OE is output after data is shifted, so need to set OE to fractional brightness
                     if(j && j <= lsbMsbTransitionBit) {
                         // divide brightness in half for each bit below lsbMsbTransitionBit
                         int lsbBrightness = brightness >> (lsbMsbTransitionBit - j + 1);
-                        if((refreshBufferPosition) >= lsbBrightness) v|=BIT_OE;
+                        if((refreshBufferPosition) >= lsbBrightness+postLatchBlank) v|=BIT_OE;
                     }
-
-                    // need to turn off OE one clock before latch, otherwise can get ghosting
-#if (CLKS_DURING_LATCH > 0)
-                    if((refreshBufferPosition)==PIXELS_PER_LATCH-1) v|=BIT_OE;
-#else
-                    if((refreshBufferPosition)>=PIXELS_PER_LATCH-2) v|=BIT_OE;
+#else // SCAN_BY_BITPLANE
+                    // MSBs always output normal brightness
+                    int rowBrightness = brightness;
+                    int firstRow = (currentRow == 0);
+                    // special case for the bits 0 through (lsbMsbTransitionBit-1), need to set OE to fractional brightness
+                    // but this is actually the brightness of the previous row, which is 1/2 for the first row (last row of
+                    // previous frame), except for the LSB which is full brightness from the previous MSB frame
+                    if(j <= lsbMsbTransitionBit && !(j==0 && firstRow)) {
+                        // divide brightness in half for each bit below lsbMsbTransitionBit
+                        rowBrightness = brightness >> (lsbMsbTransitionBit - j + firstRow);
+                    }
+                    if((refreshBufferPosition) >= rowBrightness+postLatchBlank) v|=BIT_OE;
 #endif
-
                     if (tempRow0[i+k].red & mask)
                         v|=BIT_R1;
                     if (tempRow0[i+k].green & mask)
